@@ -1,0 +1,1166 @@
+---
+title: 'Projet 2021: Décomposition en valeurs singulières et Tables de mortalité'
+author: "NGO Khoa Anh "
+date: "`r Sys.Date()`"
+output:
+  html_notebook:
+    code_folding: none
+    number_sections: yes
+    toc: yes
+  html_document:
+    fig_caption: yes
+    keep_md: yes
+    number_sections: yes
+    toc: yes
+  pdf_document:
+    toc: yes
+subtitle: 'Échéance: 2021-12-10'
+params:
+  datapath: https://www.dropbox.com/s/tnci38tqchxwic6/full_life_table.Rds?dl=0
+  country_code: fr_t
+  country: France
+  timecourse: 1945:2015
+  language: French
+---
+
+#******************************************************************* PARTIE I : À rendre (livrables) *********************************************************************
+
+- **2021-12-09:** un fichier `nom1_nom2.Rmd` qui peut être `tricoté` (knitted) sous `rstudio`.
+  - Votre fichier doit être tricoté sans erreurs et le résultat doit être un document `html` qui peut être visualisé dans un navigateur moderne.
+  - Le fichier doit contenir le code utilisé pour construire les graphiques et les résumés numériques.
+  - Le fichier doit contenir le texte de vos commentaires (en anglais ou en français).
+  - Les commentaires doivent être rédigés avec soin et précision et doivent être concis.
+  - Le fichier `nom1_nom2.Rmd` sera téléchargé sur `Moodle`.
+- **2021-12-14:** une présentation orale de 20 minutes sur des éléments extraits de votre premier livrable `nom1_nom2.Rmd`.
+  - La présentation consiste en un exposé de 12 minutes et 8 minutes de questions et réponses.
+  - La présentation est soutenue par des diapositives
+  - Les diapositives générées à partir de `Rmarkdown` doivent être privilégiées. Vous pouvez choisir le format que vous préférez (`binb`, `xaringan`, `slidy`, `ioslides`, ...)
+
+---
+
+#******************************************************************* PARTIE II : Objectifs ********************************************************************************
+
+Ce carnet de notes a pour but de
+
+  - travailler avec des **tables** (`data.frames`, `tibbles`, `data.tables`, ...) en utilisant `dplyr` ou tout autre langage d'interrogation (tel que fourni par exemple par `data.table`)
+  - visualiser des données démographiques comme celles fournies par [Human Mortality Database organization] (https://www.mortality.org).
+  - l'utilisation de l'**ACP** et d'autres méthodes matricielles pour explorer des ensembles de données multivariées (les tables de mortalité peuvent être considérées comme des ensembles de données multivariées).
+
+#******************************************************************* PARTIE III : Données des tables de mortalité ****************************
+
+Les tables de données de vie ont été téléchargées à partir de [https://www.mortality.org](https://www.mortality.org). Elles ont été élaborées pour vous et peuvent être téléchargées à partir de l'URL 'https://www.dropbox.com/s/tnci38tqchxwic6/full_life_table.Rds?dl=0', enregistrées dans votre répertoire de travail.
+
+Si vous installez et chargez le paquet [https://cran.r-project.org/web/packages/demography/index.html](https://cran.r-project.org/web/packages/demography/index.html), vous trouverez également des tables de mortalité.
+
+
+Nous étudions des tables de mortalité décrivant des pays d'Europe occidentale (France, Grande-Bretagne -en fait Angleterre et Pays de Galles-, Italie, Pays-Bas, Espagne et Suède) et les États-Unis.
+
+Nous chargeons les tables de mortalité annuelles pour les femmes, les hommes et la population totale (`both`) des différents pays.
+
+
+```{r, echo=FALSE, eval=FALSE}
+# for debugging
+# params should be initialized from YAML header
+params<- list(
+    timecourse= 1945:2015,
+    datapath= 'https://www.dropbox.com/s/tnci38tqchxwic6/full_life_table.Rds?dl=0',
+    country_code= 'fr_t',
+    country= 'France')
+```
+
+```{r, echo=FALSE}
+timecourse <- eval(rlang::parse_expr(params$timecourse))
+```
+
+```{r tidyverse, message=FALSE, warning=FALSE, echo=FALSE}
+if(! 'pacman' %in% installed.packages()[,1]){
+  install.packages("pacman")
+}
+
+pacman::p_load(tidyverse)
+pacman::p_load(plotly)
+pacman::p_load(foreach)
+pacman::p_load(iterators)
+pacman::p_load(DT)
+pacman::p_load(ade4)
+pacman::p_load(FactoMineR)
+pacman::p_load(factoextra)
+pacman::p_load(FactoInvestigate)
+pacman::p_load(ggfortify)
+pacman::p_load(pathlibr)
+pacman::p_load(demography)
+pacman::p_load(glue)
+```
+
+```{r set_knitr, echo=FALSE}
+old_theme <-theme_set(theme_dark(base_size=9,
+                                 base_family = "Helvetica"))
+
+knitr::opts_chunk$set(eval=TRUE,
+  echo=FALSE,
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE,
+  autodep = TRUE,
+  tidy = FALSE)
+
+```
+
+```{r setup_iso_codes, echo=FALSE}
+country_code <- list(fr_t='FRATNP',
+                     fr_c='FRACNP',
+                     be='BEL',
+                     gb_t='GBRTENW',
+                     gb_c='GBRCENW',
+                     nl='NLD',
+                     it='ITA',
+                     swe='SWE',
+                     sp='ESP',
+                     us='USA')
+
+countries <- c('fr_t',  'gb_t',  'nl', 'it', 'sp', 'swe', 'us')
+
+country_names <- list(fr_t='France',     # total population
+                     fr_c='France',      # civilian population
+                     be='Belgium',
+                     gb_t='England & Wales',    # total population
+                     gb_c='England & Wales',    # civilian population
+                     nl='Netherlands',
+                     it='Italy',
+                     swe='Sweden',
+                     sp='Spain',
+                     us='USA')
+
+gender_names <- list('b'='Both',
+                     'f'='Female',
+                     'm'='Male')
+```
+
+Téléchargez les données depuis `r params$datapath` dans votre répertoire _de travail_ (working directory). Enregistrez-les sous le nom de `full_life_table.Rds`. Chargez-le en mémoire en utilisant `readr::read_rds()`.
+
+```{r load_life_table, echo=TRUE, results='asis'}
+fpath <- 'full_life_table.Rds'  # once you have downloaded the file
+
+if (! file.exists(fpath)){
+  cat(glue('{fpath} should be in working directory!'))
+} else {
+  life_table <- readr::read_rds(fpath)
+  glimpse(life_table)
+}
+```
+
+Vérifiez sur [http://www.mortality.org](http://www.mortality.org) la signification des différentes colonnes:
+
+Le document [Tables de mortalité françaises pour les XIXe et XXe siècles et projections pour le XXIe siècle](https://www.lifetable.de/data/FRA/FRA000018061997CY1.pdf) contient
+des informations détaillées sur la construction des Tables de mortalité pour la France.
+On peut en général distinguer deux types de Tables de mortalité : les *Tables du moment* qui
+contiennent pour chaque année civile, les _risques_ de mortalité à différents âges pour cette même année ; et les *Tables de génération* qui contiennent pour une année de naissance donnée, les _risques_ de mortalité auxquels un individu né au cours de cette année a été exposé.
+
+
+Les tables de mortalité étudiées dans ce travail sont les *Tables du moment*. D'après le document de Vallin et Meslé, l'élaboration des tables de mortalité a nécessité des choix et un travail substantiel d'édition.
+
+Voir (entre autres)
+
+- p. 19 Les variations brutales des quotients de mortalité à certains âges pour une année civile donnée
+- L'estimation des quotients de mortalité au grand âge.
+
+Voir aussi les [schémas de Lexis] (https://en.wikipedia.org/wiki/Lexis_diagram).
+
+---
+
+À partir de maintenant, la table universelle est nommée `life_table`.
+
+Les tables de mortalité sur lesquelles vous allez travailler sont appelées _tableaux de mortalité de l'année_.
+
+
+| Nom de la colonne | Type de colonne | Signification |
+|:------------|:------------|----------|
+| **Année** | nombre entier | |
+| **Age** | entier | Âge $x$ |
+| mx | double | Taux de mortalité central à l'âge $x$ : $m_x$ |
+| __qx__ | double | Probabilité de mourir entre l'âge de $x$ et l'âge de $x+1$ $q_x = \frac{m_x}{1+ m_x/2}$ | Ax | double | $ 5,5 $.
+| ax | double | 0,5$ sauf à l'âge 0$ |
+| lx | entier | Nombre de personnes encore en vie à l'âge de $x$ dans une cohorte fictive de $100000$ | dx | entier | Nombre de personnes encore en vie à l'âge de $x$.
+| dx | integer | Nombre de personnes décédées entre l'âge $x$ et $x+1$ durant l'année dans la cohorte fictive |
+| Lx | entier | Nombre d'années-personnes vécues entre l'âge de $x$ et $x+1$, $L_x = \ell_x - d_x\times a_x$ dans la cohorte fictive |
+| Tx | entier | |
+| ex | double | Espérance de vie résiduelle à l'âge $x$ |
+| **Pays** | facteur | Pays-Bas/...        |
+| **Sexe** | facteur | Féminin / Masculin | Femme / Homme
+
+Voir  Preston _et al._ pour les détails et les explications.
+
+#******************************************************************* PARTIE IV : L'Ouest (de l'Europe) en 1948 ************************************************************
+
+- [4.1] Tracez les _quotients de mortalité_ de tous les pays à tous les âges pour l'année 1948.
+
+
+```{r}
+ggplot_Ageqx_1948 <- life_table %>% filter(Year==1948) %>%
+  ggplot() +
+  aes(x=Age, y=qx, colour=Country) +
+  scale_y_log10()+
+  geom_line(size = .5) +
+  facet_grid(~ Gender) +
+  ggtitle("The mortality quotients of all Countries at all ages for year 1948") +
+  xlab("Age") +
+  ylab("Mortality quotient") +
+  guides(color = guide_legend(title = "Country",
+                              override.aes = list(size = 5),
+                              order = 1)) 
+
+ggplot_Ageqx_1948   # affiche le graphe initial = Tous les pays sont le même graphe. 
+
+ggplot_Ageqx_1948 %+% facet_wrap(~Country)   # Affiche un graphe par pays
+```
+
+- [4.2] Commentaire
+
+ Les taux de mortalités des pays ont la même tendance. Pour être précise, c'est l’une augmentation en fonction du temps. 
+ 
+ En particulier, le taux de mortalité à l'âge 0 en Espagne, Italie et France est un peu plus élevé que dans les autre pays à la même période.
+ 
+ Entre 0 et 60 ans, les taux de mortalité sont assez proches entre les pays.
+ Et à partir de 60 ans, le taux de mortalité augmentent rapidement dans tous les pays.
+ 
+ On peut voir concrètement que le taux de mortalité aux âges élevés est un peu plus faible en Espagne et plus élevé en Italie et en Suède.
+ 
+
+- [4.3] Tracer les rapports entre les _quotients de mortalité_ des pays européens et les _quotients de mortalité_ des USA en 1948.
+
+```{r}
+lt_1948 <- life_table %>% filter(Year==1948, Gender=='Both') %>% select(Country, Year, Gender,Age, qx)
+view(lt_1948)
+
+lt_1948_USA <- life_table %>% filter(Year==1948, Gender=='Both', Country=='USA') %>% select(Year,Age,qx) %>% rename(qx_USA=qx)
+view(lt_1948_USA)
+
+ggplot_EU_USA <-left_join(lt_1948,lt_1948_USA, by=c("Year","Age")) %>% mutate(rap_qx=qx/qx_USA) %>%
+  ggplot() +
+  aes(x=Age, y=rap_qx, colour=Country) +
+  geom_point (alpha=.35, size=.3) +
+  geom_line() +
+  ggtitle("Rapports des quotients de mortalités entre les pays Européens et USA en 1948")
+
+ggplot_EU_USA   
+ggplot_EU_USA %+% facet_wrap(~Country)
+```
+
+- [4.4] Commentaire
+
+ Les graphiques montrent que, par rapport aux Etats-Unis :
+
+ Le taux de mortalité aux bas âges en Italie et en Espagne semblait presque catastrophique et mauvais en France. Par contre, aux âges plus élevés, le taux de mortalité des pays Européens est assez comparable à celui des Etats-Unis.
+
+Concrètement :
+
+- Entre la France et Etats-Unis :
+  
+  De 0 à 60 ans : le taux de mortalité de la France est plus élevé que celui des Etats-Unis.
+  
+  A partir de 60 ans, le taux de mortalité de la France se rapproche de celui des Etats-Unis.
+  
+- Entre l'Italie et Etats-Unis :
+  
+  De 0 à 30 ans : le taux de mortalité de l'Italie augmente fortement, surtout à l'âge de 0 à 10 ans.
+  
+  A partir de 30 ans : le taux de mortalité de l’Italie varie plus ou moins légèrement que Etats-Unis.
+  
+- Entre l'Espagne et les Etats-Unis :
+  
+  De 0 à 30 ans : il y a un grand écart entre les deux pays, notamment de 0 à 10 ans, le taux de mortalité de l'Espagne est plus élevée que Etats-Unis.
+  
+  A partir de 30 ans : le taux de mortalité de ces pays reste identique.
+  
+  On remarque aussi que le nombre des jeunes morts (de 0 à 30 ans) en Espagne est plus important qu’aux Etats-Unis. Et à partir de 60 ans ce taux semble analogue par rapport aux autres pays européens.
+
+#******************************************************************* PARTIE V : Evolution des taux de mortalité depuis la seconde guerre mondiale ***************
+
+- [5.1] Tracer les _quotients de mortalité_ (colonne `qx`) pour les deux sexes en fonction de l'âge pour les années `1946, 1956, ...` jusqu'à `2016` .
+Utilisez l'esthétique pour distinguer les années.
+
+```{r}
+ggplot_Evol<- life_table %>% filter(Year %in% seq(1946, 2016, 10)) %>%
+  ggplot() +
+  aes(x=Age, y=qx, colour=Year) +
+  geom_point (alpha=.35, size=.3) +
+  geom_line() +
+  ggtitle("Quotient de mortalités tous les genres de 1946 à 2016") 
+
+ggplot_Evol 
+```
+
+Commentaire :
+
+On voit que les couleurs claires sont au dessous de couleurs sombres, c'est-à-dire que le taux de mortalité est en baisse surtout pour les âges supérieurs à 55 ans et inférieurs à 5. Pour les âges intermédiaires, le taux de mortalité reste intact. 
+
+- [5.2] Facette par `Gender` et `Country`.
+
+```{r}
+ggplot_Evol %+% facet_grid( Gender~Country)
+```
+Le même commentaire semble valable pour chaque pays et chaque sexe.
+
+- [5.3] Écrivez une fonction `ratio_mortality_rates` dont la signature est
+`function(df, reference_year=1946, target_years=seq(1946, 2016, 10))`
+qui prend comme entrée
+
+  - un tableau de données avec le même schéma que `life_table`,
+  - une année de référence `ref_year` et
+  - une séquence d'années `target_years`.
+
+et qui renvoie un tableau de données avec le schéma :
+
+
+| Nom de la colonne | Type de colonne |
+|:------------|:------------|
+| Année | entier |
+| Age | entier |
+| qx | double |
+| qx.ref_year| double |
+| Pays | facteur
+| Sexe | Facteur
+
+où `(Pays, Année, Age, Sexe)` sert de _clé primaire_,
+`qx` désigne le quotient de mortalité à `Age` pour `Année` et `Genre` dans `Pays`
+tandis que `qx_ref_year` indique le quotient de mortalité à `Age` pour l'argument `reference_year`.
+dans le `pays` pour le `sexe`.
+
+-[5.3] : Write a function ratio_mortality_rates with signature
+
+```{r}
+lt_1946 <- life_table %>% filter(Year==1946) %>% select(Age, qx, Country, Gender) %>% rename(qx.ref_year=qx)
+sel <- seq(1946, 2016, 10)
+lt <- life_table %>% filter(Year %in% sel) %>% select(Year, Age, qx, Country, Gender)
+ltc <- left_join(lt,lt_1946,by=c("Country","Gender","Age"))
+
+ratio_mortality_rates<-function(df,reference_year=1946, target_years=seq(1946, 2016, 10)){
+  lt_ref <- df %>% filter(Year==reference_year) %>% select(Age, qx, Country, Gender) %>% rename(qx.ref_year=qx)
+  lt <- df %>% filter(Year %in% target_years) %>% select(Year, Age, qx, Country, Gender)
+  ltc <- left_join(lt,lt_ref,by=c("Country","Gender","Age"))
+  return(ltc)
+}
+
+ratio_mortality_rates(life_table)
+```
+
+
+
+
+- [5.4] Dessinez des graphiques affichant le rapport $q_{x,t}/q_{x, 1946}$ pour les âges $x \in 1, \ldots, 90$ et l'année $t$ pour $t \in 1946, \ldots, 2016$.
+et l'année $t$ pour $t \in 1946, \ldots, 2016$ où $q_{x,t}$ est le quotient de mortalité à l'âge $x$ pendant l'année $t$.
+
+
+
+- [5.4.1] Traiter les deux sexes et les deux pays `Espagne`, `Italie`, `France`, `Angleterre et Pays de Galles`, `USA`, `Suède`, `Pays-Bas`.
+
+```{r}
+ggplot_Evol2 <- ratio_mortality_rates(life_table) %>% mutate(rap_qx=qx/qx.ref_year) %>% filter(Age<=90) %>%
+  ggplot() +
+  aes(x=Age, y=smooth(rap_qx), group = Year, colour=Year) +
+  geom_point (alpha=.35, size=.3) +
+  geom_line() +
+  ggtitle("Evolution des rapports de quotients de mortalités pour les années 1946 à 2016, par tranche 10, année référence 1946=1") 
+
+ggplot_Evol2
+```
+- [5.4.2] Une graphique correctement facetté est suffisant  (`facet_grid()`, `facet_wrap()`).
+
+```{r}
+ggplot_Evol2 %+% facet_grid(Gender~Country)
+```
+
+- [5.5] Commentaire
+
+D’après les graphiques d’évolution de quotients de mortalité :
+
+On constate que :
+
+- Le taux de mortalité des années récentes (entre 2000 et 2016) a une tendance d’augmentation mais il y a une forte diminution par rapport à la période précédente : de 1946 à 1970.
+
+- Par rapport à l’âge : 
+
+ Jusqu’à 45 ans, on note une amélioration importante entre 1946 et 1956 (la courbe la plus foncée), qui continue progressivement ensuite.
+
+ Pour les 50 ans et plus, la diminution est progressive.
+
+- Par rapport au sexe : 
+
+ Pour les hommes, dans certains pays, le quotient de mortalité dans les 10 ou 20 premières années est plus important que celui des femmes.
+
+ Le taux de mortalité des années suivantes reste semblable entre les deux sexes.
+ 
+
+#6 ******************************************************************* PARTIE VI : Tendances ********************************************************************************
+
+
+- [6.1] Tracer les quotients de mortalité aux âges $0, 1, 5$ en fonction du temps. Facette par `Gender` et `Country`.
+
+```{r}
+ggplot_age_015 <- life_table %>% filter(Age %in% c(0,1,5)) %>% select(Year, Country, Gender, Age, qx) %>%
+  ggplot() +
+  aes(x=Year, y=qx, colour=factor(Age)) +
+  geom_point (alpha=.35, size=.3) +
+  geom_line() +  
+  ggtitle("Quotients de mortalités aux âges :  0,1,5")
+
+ggplot_age_015
+
+ggplot_age_015 %+% facet_grid(Gender~Country)
+```
+
+- [6.2] Commentaire
+
+- Dans tous les pays et pour tous les sexes, la diminution de mortalité dans les premières années de la vie, ici à l'âge 0 a été importante voire, spectaculaire pour l'Italie, l'Espagne et la France.
+
+- A l'âge 1, l'Italie et l'Espagne ont le taux de mortalité plus élevé parmi les pays européens et les Etats-Unis. Pour les autres pays, ils ont presque la même tendance pour le taux de mortalité.
+
+- A 5 ans, le taux de mortalité de tous les pays est assez faible, il est très proche de 0.
+
+- A partir de 1946, le taux de mortalité à l'âge 1 et 5 est quasiment semblable.
+
+- Les taux de mortalité des femmes semblent toujours un peu inférieurs à ceux des hommes.
+
+- [6.3] Tracez les quotients de mortalité aux âges de $15, 20, 40, 60$ en fonction du temps. Facette par `Gender` et `Country`.
+
+```{r}
+ggplot_age_15204060 <- life_table %>% filter(Age %in% c(15,20,40,60)) %>% select(Year, Country, Gender, Age, qx) %>%
+  ggplot() +
+  aes(x=Year, y=qx, colour=factor(Age)) +
+  geom_point (alpha=.35, size=.3) +
+  geom_line() +  
+  ggtitle("Quotients de mortalités aux âges : 15,20,40,60")
+
+ggplot_age_15204060
+
+ggplot_age_15204060 %+% facet_grid(Gender~Country)
+```
+
+- [6.4] Commentaire
+
+- Les évolutions depuis 1946 ont étaient plus fortes pour les hommes que pour les femmes.
+
+- Pour les femmes, les taux de mortalité à 15 et 20 ans sont proches dans tous les pays tandis que les taux de mortalité sont plus élevés à 20 ans qu'à 15 ans chez les hommes.
+
+- En France, à 20 ans, les taux de mortalité ont diminué de 1945 à 1960, puis ont remonté à leur niveau initial jusqu'en 1980.
+
+- Les taux de mortalité des hommes à 60 ans ont commencé à baisser vers 1980.
+
+- Les taux de mortalité des femmes à l'âge de 60 ans ont diminué régulièrement au cours des 6-7 décennies.
+
+- Les années 1940-1945 présentent des perturbations de formes et d'intensités différentes en France, en Italie, en Angleterre et aux Pays-Bas.
+
+
+#******************************************************************* PARTIE VII : Réarrangement ***************************************************************************
+
+- [7.1] A partir du tableau de données `life_table`, calculez un autre tableau de données appelé `life_table_pivot`,  avec les clés primaires `Country`, `Gender` et `Year`, avec une colonne pour chaque `Age` de `0` à `110`.
+
+Vous pouvez utiliser les fonctions  `pivot_wider`, `pivot_longer` du package  `tidyr::`.
+
+Le schéma du résultat devrait avoir l'aspect suivant:
+
+| Nom de colonne | Type    |
+|:------------|:--------|
+| Country     | factor  |
+| Gender      | factor  |
+| Year        | integer |
+| `0`         | double  |
+| `1`         | double  |
+| `2`         | double  |
+| `3`         | double  |
+| $\vdots$    | $\vdots$|
+
+```{r}
+life_table_pivot <- life_table %>% select (Country, Gender,Year, Age, qx) %>% pivot_wider(names_from = Age,values_from = qx) 
+life_table_pivot
+```
+
+- [7.2] À partir de  `life_table_pivot` calculer l'espérance de vie à la naissance  pour chaque clé `Country, Gender` and `Year`.
+
+```{r}
+life_table_pivot <- life_table %>% select (Country, Gender,Year, Age, qx) %>% pivot_wider(names_from = Age,values_from = qx) 
+life_table_pivot
+```
+
+
+#******************************************************************* PARTIE VIII : Espérance de vie **********************************************************************
+
+- [8.1] Écrire une fonction qui prend en entrée un vecteur de quotients de mortalité, ainsi qu'un âge, et renvoie l'espérance de vie résiduelle correspondant au vecteur et à l'âge donné.
+
+```{r}
+res_life <- function(qx1,age1){
+  life_table1 <- life_table%>% filter(Age==age1,qx %in% qx1)
+  v = c()
+  for (j in 1:length(life_table1)){
+    v[j] = life_table1$ex[j]
+  }
+  v <- na.exclude(v)
+  return(v)
+}
+
+res_life(c(0.00945,0.00938),23) #TEST
+```
+
+- [8.2] Écrivez une fonction qui prend comme entrée un tableau de données avec le même schéma que `life_table` et retourne un tableau de données avec les colonnes `Country`, `Gender`, `Year`, `Age` définissant une clé primaire et une colonne `res_lex` contenant l'espérance de vie résiduelle correspondant à la clé primaire.
+
+ Afin de calculer les espérances de vie résiduelles, vous pouvez envisager d'utiliser les fonctions "fenêtre" `window` qui permettent de définir des fenêtres appropriées. Le paquet `dplyr` n'offre pas une très riche interface (API) pour les fonctions "fenêtre" (window functions). Le paquet `dbplyr` le fait.
+
+
+```{r}
+
+lex <- function(qx,age)
+{
+  mx = qx/(1-qx/2)
+  return(sum(cumprod(as.numeric(1-mx[(age+1):length(mx)]))))
+}
+
+lex2 <- function(df){
+  res.lex = c(1:dim(df)[1])
+  for (i in 1:((dim(df)[1])/110)){
+for (j in 1:110){
+  res.lex[((i-1)*110)+j]=lex(df$qx[((i-1)*110+1):(i*110)],(j-1))
+}
+  }
+  df %>%
+select(Country,Gender,Year,Age)->m
+  res.lex=as.data.frame(res.lex)
+  p=cbind.data.frame(m,res.lex)
+  return(p)
+}
+
+residuals <- lex2(life_table)
+residuals
+```
+
+- [8.3] Tracez l'espérance de vie résiduelle en fonction de `Year` aux âges de $60$ et $65$. Créer une facette par `Gender` et `Country` (`facet_wrap, facet_grid`).
+
+```{r retirement, echo=FALSE, eval=FALSE}
+res_life_expect_6065 <- life_table %>% filter(Age %in% c(60,65))
+
+ggplot_res_life <- res_life_expect_6065 %>%
+  ggplot() +
+  aes(x=Year, y=ex, colour=factor(Age)) +
+  geom_line() +  
+  ggtitle("Espérance de vie résiduelle en fonction de Year aux âges de 60 et 65")
+
+ggplot_res_life
+
+ggplot_res_life +facet_grid(Gender~Country)
+```
+
+#******************************************************************* PARTIE IX : PCA et SVD sur les tables de log-mortalité *********************************************
+
+- [9.1] Choisissez un pays, un sexe, une plage d'années `1948:2010`.
+Extrayez les lignes correspondantes de `life_table_pivot`. Prendre les _logarithmes_ des
+quaotients de mortalité et effectuez une analyse en composantes principales.
+Évaluez les résultats de l'ACP avec et sans centrage et normalisation des colonnes.
+
+
+#Pick Country = France , Gender = Both
+```{r}
+life_table_1948_2010 <- life_table_pivot %>% filter(Year %in% c(1948:2010),Country=="France",Gender=="Both") 
+log_mortality <- log(life_table_1948_2010[,c(4:113)])
+res.pca <- prcomp(log_mortality, scale = FALSE)
+fviz_eig(res.pca)
+fviz_pca_ind(res.pca,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+fviz_pca_var(res.pca,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+fviz_pca_biplot(res.pca, repel = TRUE,
+                col.var = "#2E9FDF", # Variables color
+                col.ind = "#696969"  # Individuals color
+)
+```
+
+- [9.2] Commentez le(s) graphe(s) d'affichage.
+
+Le premier axe factoriel représente 94,9% de la variance (ce qui est très élevé) et le second est 2,2% de la variance, etc...
+
+- [9.3] Commenter le(s) cercle(s) de corrélation.
+
+On a 63 points correspondant de 1948 à 2010, on retrouve le fait que le premier axe factoriel réprésente 94,9% de la variance. 
+
+Cet axe est clairement lié au temps : les années anciennes sont sur la gauche et les années récentes sont sur la droite.
+
+Ce graphique représente la corrélation entre les deux premiers axes factoriels et chacune des variables initiales (log de qx de 0 à 109)
+
+On voit que le premier axe factoriel est très corrélé avec tous les variables âges : les coefficients de mortalité diminuent tous dans le temps plus ou moins. 
+
+Le deuxième axe factoriel différencie la façon dont le qx évolue selon l'âge. 
+
+
+- [9.4] Commentez le(s) `biplot(s)`
+
+Juste une superposition (positioner l'un sur l'autre) de deux graphiques précédents. 
+
+- [9.5]  Choisissez la combinaison de centrage et de normalisation qui vous semble la plus pertinente. Motivez votre choix
+
+9.5.1.1 : Center = False , Scale = False
+```{r}
+life_table_1948_2010 <- life_table_pivot %>% filter(Year %in% c(1948:2010),Country=="France",Gender=="Both") 
+log_mortality <- log(life_table_1948_2010[,c(4:113)])
+res.pca1 <- prcomp(log_mortality, center = FALSE, scale = FALSE)
+fviz_eig(res.pca1)
+fviz_pca_ind(res.pca1,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+fviz_pca_var(res.pca1,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+fviz_pca_biplot(res.pca1, repel = TRUE,
+                col.var = "#2E9FDF", # Variables color
+                col.ind = "#696969"  # Individuals color
+)
+```
+9.5.1.2 : 
+Center = True , Scale = False
+```{r}
+life_table_1948_2010 <- life_table_pivot %>% filter(Year %in% c(1948:2010),Country=="France",Gender=="Both") 
+log_mortality <- log(life_table_1948_2010[,c(4:113)])
+res.pca2 <- prcomp(log_mortality, center = TRUE, scale = FALSE)
+fviz_eig(res.pca2)
+fviz_pca_ind(res.pca2,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+fviz_pca_var(res.pca2,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+fviz_pca_biplot(res.pca2, repel = TRUE,
+                col.var = "#2E9FDF", # Variables color
+                col.ind = "#696969"  # Individuals color
+)
+```
+
+9.5.1.3 : 
+Center = False , Scale = True
+```{r}
+life_table_1948_2010 <- life_table_pivot %>% filter(Year %in% c(1948:2010),Country=="France",Gender=="Both") 
+log_mortality <- log(life_table_1948_2010[,c(4:113)])
+res.pca3 <- prcomp(log_mortality, center = FALSE, scale = TRUE)
+fviz_eig(res.pca3)
+fviz_pca_ind(res.pca3,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+fviz_pca_var(res.pca3,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+fviz_pca_biplot(res.pca3, repel = TRUE,
+                col.var = "#2E9FDF", # Variables color
+                col.ind = "#696969"  # Individuals color
+)
+```
+
+9.5.1.4 : 
+Center = True , Scale = True
+```{r}
+life_table_1948_2010 <- life_table_pivot %>% filter(Year %in% c(1948:2010),Country=="France",Gender=="Both") 
+log_mortality <- log(life_table_1948_2010[,c(4:113)])
+res.pca4 <- prcomp(log_mortality, center = TRUE, scale = TRUE)
+scree_plot_FR <- fviz_eig(res.pca4)
+scree_plot_FR
+fviz_pca_ind(res.pca4,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+fviz_pca_var(res.pca4,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+fviz_pca_biplot(res.pca4, repel = TRUE,
+                col.var = "#2E9FDF", # Variables color
+                col.ind = "#696969"  # Individuals color
+)
+```
+Commentaire :
+
+Après avoir analysé les données, on constate que le choix « Center = TRUE » est préférable que celui de « Center = FALSE ». Puisqu’on regarde la répartition de la variance selon les cas en ragardant le bilplot. Concrètement, on voit que la variance expliquée par le premier axe a diminué un peu et que le nuage de point a plus tassé. 
+La normalisation réduit la variabilité. Les log de qx ont des valeurs entre -5 et -1, ce qui ne nécessite pas une normalisation.
+Comme on s'intéresse au l'évolution dans le temps, le centrage des variables semble souhaitable.
+Donc mon choix pour la combinaison de Scaling et Centering est : Scale = TRUE , Center = TRUE or Scale = False , Center = TRUE
+
+
+- [9.6]  Effectuez une ACP sur l'ensemble des pays et des sexes avec la combinaison de centrage et de mise à l'échelle choisie.
+#Refaire une autre analyse avec scale=TRUE
+
+England & Wales
+
+```{r}
+life_table_1948_2010 <- life_table_pivot %>% filter(Year %in% c(1948:2010),Country == "England & Wales") 
+log_mortality <- log(life_table_1948_2010[,c(1:3)])
+res.pca <- prcomp(log_mortality, center = TRUE , scale = TRUE)
+fviz_pca_ind(res.pca,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+scree_plot_ENG <- fviz_eig(res.pca)
+scree_plot_ENG
+```
+
+Netherlands
+
+```{r}
+life_table_1948_2010 <- life_table_pivot %>% filter(Year %in% c(1948:2010),Country == "Netherlands") 
+log_mortality <- log(life_table_1948_2010[,c(4:113)])
+res.pca <- prcomp(log_mortality, center = TRUE , scale = TRUE)
+fviz_pca_ind(res.pca,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+scree_plot_Net <- fviz_eig(res.pca)
+scree_plot_Net
+```
+
+Italy
+
+```{r}
+life_table_1948_2010 <- life_table_pivot %>% filter(Year %in% c(1948:2010),Country == "Italy") 
+log_mortality <- log(life_table_1948_2010[,c(4:113)])
+res.pca <- prcomp(log_mortality, center = TRUE , scale = TRUE)
+fviz_pca_ind(res.pca,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+scree_plot_Italy <- fviz_eig(res.pca)
+scree_plot_Italy
+```
+Sweden
+
+```{r}
+life_table_1948_2010 <- life_table_pivot %>% filter(Year %in% c(1948:2010),Country == "Sweden") 
+log_mortality <- log(life_table_1948_2010[,c(4:113)])
+res.pca <- prcomp(log_mortality, center = TRUE , scale = TRUE)
+fviz_pca_ind(res.pca,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+scree_plot_Sweden <- fviz_eig(res.pca)
+```
+Spain
+
+```{r}
+life_table_1948_2010 <- life_table_pivot %>% filter(Year %in% c(1948:2010),Country == "Spain") 
+log_mortality <- log(life_table_1948_2010[,c(4:113)])
+res.pca <- prcomp(log_mortality, center = TRUE , scale = TRUE)
+fviz_pca_ind(res.pca,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+scree_plot_Spain <- fviz_eig(res.pca)
+scree_plot_Spain
+```
+
+USA
+
+```{r}
+life_table_1948_2010 <- life_table_pivot %>% filter(Year %in% c(1948:2010),Country == "USA") 
+log_mortality <- log(life_table_1948_2010[,c(4:113)])
+res.pca <- prcomp(log_mortality, center = TRUE , scale = TRUE)
+fviz_pca_ind(res.pca,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+scree_plot_USA <- fviz_eig(res.pca)
+scree_plot_USA
+```
+
+
+- [9.7]  Combinez les `biplots` pour différents pays (pour chaque sexe). Commentaire
+
+```{r}
+scree_plot_ENG
+scree_plot_FR
+scree_plot_Italy
+scree_plot_Net
+scree_plot_Spain
+scree_plot_USA
+```
+
+Commentaire : Apres la combinaison des Scree-Plots de toutes les pays , on trouve que le pourcentage pour dimension 1 est toujours de 80-90% avec le pourcentage des dimensions 2-4 c'est tres bas . A partir de dimension 5 , le pourcentage est presque égale à 0.
+
+
+#******************************************************************* PARTIE X : Modèle Lee-Carter pour la mortalité aux États-Unis *************************************************
+
+Au cours du siècle dernier, aux États-Unis et en Europe occidentale,
+les quotients de mortalité à tous les âges ont présenté une tendance générale à la baisse.
+Cette tendance à la baisse n'a pas toujours été homogène entre les âges.
+
+Le modèle de Lee-Carter a été conçu pour modéliser et prévoir l'évolution du quotient log-mortalité.
+l'évolution des quotients de mortalité logarithmique pour les États-Unis au cours du XXe siècle.
+
+Soit $A_{x,t}$ le logarithme du quotient de mortalité à l'âge $x$ pendant l'année $t\in T$.
+pour une population donnée (définie par le sexe et le pays).
+
+Le modèle de Lee-Carter suppose que les quotients de mortalité logarithmiques observés
+sont échantillonnés selon le modèle suivant
+\[
+A_{x,t} \sim_{\text{indépendant}} a_x + b_x \kappa_t + \epsilon_{x,t}
+\]
+où $(a_x)_x, (b_x)_x$ et $(\kappa_t)_t$ sont des vecteurs inconnus qui satisfont
+\[
+a_x = \frac{1}{|T|}\sum_{t \in T} A_{x,t}\qquad \sum_{t\in T} \kappa_t = 0 \qquad \sum_{x} b_x^2 =1
+\]
+et $\epsilon_{x,t}$ sont des variables aléatoires i.i.d. gaussiennes.
+
+# [10.1] Données US
+
+10.1.1 : Ajustez un modèle Lee-Carter sur les données américaines (pour les données masculines et féminines) en vous entraînant sur les années `1933` jusqu'à `1995`.
+
+### Estimation &  Comparaison avec la SVD tronquée de rang 2.
+
+
+```{r}
+# Etats-Unis
+us_data <- life_table %>%
+  filter(Country == "USA", Year >= 1933, Year <= 1995) %>%
+  mutate(log_qx = log(qx)) %>%
+  select(log_qx, Age, Year)
+
+A <- us_data %>%
+  pivot_wider(values_from = log_qx,
+              names_from = Year,
+              # nous avons à la fois des hommes et des femmes, on prend la moyenne
+              values_fn = list(log_qx = mean))
+
+# estimation du vecteur a
+# => moyenne des log-rates dans le temps
+a <- us_data %>%
+  group_by(Age) %>%
+  summarise(a_x = mean(log_qx, na.rm = T)) %>%
+  ungroup()
+
+# estimer b et k
+residuals <- A[, -1] - a$a_x
+svd <- svd(residuals)
+b <- as.vector(svd$u[, 1])
+k <- as.vector(svd$v[, 1])
+k <- k - mean(k)
+
+A_LC <- A
+A_LC[, -1] <- a$a_x + b%*%t(k) # reconstructed A
+norm_LC <- norm(as.matrix(A[, -1]) - as.matrix(A_LC[, -1]),
+               type = "F")
+
+# svd rang 2
+b_SVD <- as.matrix(svd$u[, 1:2])
+k_SVD <- as.matrix(svd$v[, 1:2])
+A_SVD <- A
+A_SVD[, -1] <- a$a_x + b_SVD%*%t(k_SVD) # reconstructed A by truncated rank 2 SVD
+norm_SVD <- norm(as.matrix(A[, -1]) - as.matrix(A_SVD[, -1]),
+                 type = "F")
+
+# on compare la qualité de l'ajustement par la norme HB
+print(paste0("En termes de norme HB, l'approximation de Lee-Carter donne une norme = ", round(norm_LC, 4),
+             " et un SVD de rang 2 tronqué donne ", round(norm_SVD, 4)))
+
+# La factorisation SVD de rang 2 donne une norme HB plus petite
+# ce qui est raisonnable puisque le modèle Lee-Carter est en fait une factorisation SVD de rang 1
+# Cela explique la moindre variation que dans la décomposition SVD de rang 2
+
+# on compare l'approximation
+
+# cela nous montre la reconstruction logarithmique des taux de mortalité
+# on a beaucoup d'années -> on sélectionne 12 années pour illustrer
+# le changement de la qualité ajustée pendant la période d'essai
+
+years <- round(seq(1933, 1995, length.out = 12))
+(A_LC %>%
+  pivot_longer(cols = -Age,
+               names_to = "Year",
+               values_to = "log_qx") %>%
+  mutate(method = "LC") %>%
+  bind_rows(A_SVD %>%
+  pivot_longer(cols = -Age,
+               names_to = "Year",
+               values_to = "log_qx") %>%
+  mutate(method = "SVD")) %>%
+  bind_rows(A %>%
+  pivot_longer(cols = -Age,
+               names_to = "Year",
+               values_to = "log_qx") %>%
+  mutate(method = "obs")) %>%
+  filter(Year %in% years) %>%
+  ggplot() +
+  geom_point(aes(x = Age, y = exp(log_qx), col = method), size = .75) +
+  facet_wrap(~Year, scales = "free") +
+  guides(color = guide_legend(title = "Method")) +
+  labs(title = "Reconstructed mortality quotients by two methods")+
+  ylab("Mortality quotient")) %>%
+  ggplotly(height = 450, width = 750)
+
+# si on veut voir la différence, enleve y= exp()
+```
+
+Commentaire : On observe que la factorisation SVD de rang 2 et le modèle Lee-Carter sont sous-estimés pendant le début de la période d'essai (de 1933 à 1950) pour certains âges. De plus, les 2 approches sont relativement bien ajustées jusqu'à 1978, quand ils commencent à surestimer les taux de mortalité logarithmiques.
+
+
+
+10.1.2 : Comparez l'ajustement fourni par le modèle de Lee-Carter avec l'ajustement fourni par un modèle SVD tronqué de rang $2$.
+
+##Prediction
+
+```{r}
+# On suppose que seul k change au cours du temps
+plot(sort(unique(us_data$Year)), k, type = "l",
+     main = "Value of k with time", xlab = "Year")
+
+# On suppose une tendance linéaire de k pour les années 2000 à 2015
+# for year 2000 up to 2015
+mod_k <- lm(k ~ year, data.frame(k = k, year = sort(unique(us_data$Year))))
+k_pred <- predict(mod_k, newdata = data.frame(year = 2000:2015))
+
+prediction_from_LC <- a$a_x + b%*%t(k_pred)
+
+us_data_pred <- life_table %>%
+  filter(Country == "USA", Year >= 2000, Year <= 2015) %>%
+  select(qx, Age, Year)
+
+A_pred <- us_data_pred %>% unique() %>%
+  pivot_wider(values_from = qx,
+              names_from = Year,
+              values_fn = list(qx = mean))
+
+A_pred[, -1] <- prediction_from_LC
+
+
+# on sélectionne seulement 2000, 2005, 2010, 2015
+qx_pred <- A_pred
+qx_pred[, -1] <- exp(A_pred[, -1])
+
+
+qx_pred_select <- qx_pred %>%
+  select_at(c('Age', '2000', '2005', '2010', '2015')) %>%
+  pivot_longer(cols = -Age,
+               names_to = "Year",
+               values_to = "qx") %>%
+  mutate(class = "pred", Year = as.integer(Year))
+
+qx_obs_select <- us_data_pred %>%
+  filter(Year %in% seq(2000, 2015, 5)) %>%
+  mutate(class = "obs")
+
+
+bind_rows(qx_obs_select, qx_pred_select) %>%
+  ggplot(aes(x = Age, y = qx, color = class)) +
+  geom_point() +
+  facet_wrap(~Year, scales = "free") +
+  guides(color = guide_legend(title = "Class")) +
+  labs(title = "Predicted and observed mortality quotients")+
+  ylab("Mortality quotient")
+
+# 2 lignes pour les observations jusqu'à qu'on ait à la fois Male et Female
+```
+
+## 10.2 Application du modèle Lee-Carter à un pays européen - la France
+    
+### Estimation
+
+```{r}
+# get FR data before 2000 for training
+# On prend les données en France avant 2000 pour notre test
+
+fr_data <- life_table %>%
+  filter(Country == "France", Year < 2000) %>%
+  mutate(log_qx = log(qx)) %>%
+  select(log_qx, Age, Year)
+
+A <- fr_data %>%
+  pivot_wider(values_from = log_qx,
+              names_from = Year,
+              values_fn = list(log_qx = mean))
+
+# estimate b and k
+# estimer b et k
+residuals <- A[, -1] - a$a_x
+svd <- svd(residuals)
+b <- as.vector(svd$u[, 1])
+k <- as.vector(svd$v[, 1])
+k <- k - mean(k)
+
+A_LC <- A
+A_LC[, -1] <- a$a_x + b%*%t(k) # reconstructed A
+
+# svd rang 2
+b_SVD <- as.matrix(svd$u[, 1:2])
+k_SVD <- as.matrix(svd$v[, 1:2])
+A_SVD <- A
+A_SVD[, -1] <- a$a_x + b_SVD%*%t(k_SVD) # reconstructed A by truncated rank 2 SVD
+
+
+# comparer l'approximation
+
+# ici on montre les qx log reconstruits
+# beaucoup d'années -> on sélectionne 12 années pour illustrer
+# le changement de la qualité ajustée pendant la période d'essai
+
+years <- round(seq(min(fr_data$Year),
+                   max(fr_data$Year),
+                   length.out = 12))
+(A_LC %>%
+  pivot_longer(cols = -Age,
+               names_to = "Year",
+               values_to = "log_qx") %>%
+  mutate(method = "LC") %>%
+  bind_rows(A_SVD %>%
+  pivot_longer(cols = -Age,
+               names_to = "Year",
+               values_to = "log_qx") %>%
+  mutate(method = "SVD")) %>%
+  bind_rows(A %>%
+  pivot_longer(cols = -Age,
+               names_to = "Year",
+               values_to = "log_qx") %>%
+  mutate(method = "obs")) %>%
+  filter(Year %in% years) %>%
+  ggplot() +
+  geom_point(aes(x = Age, y = exp(log_qx), col = method), size = .75) +
+  facet_wrap(~Year, scales = "free")  +
+  guides(color = guide_legend(title = "Method")) +
+  labs(title = "Reconstructed mortality quotients by two methods") +
+  ylab("Mortality quotient")) %>%
+  ggplotly(height = 450, width = 750)
+
+```
+
+Comme pour les USA, les deux méthodes donnent une courbe très lisse (smooth estimate) des taux de mortalité tandis qu'on observe des fluctuations pour les personnes de plus de 70 ans. On observe également une sous-estimation similaire de 1883 à 1932 par exemple
+
+##Prediction 
+
+
+```{r}
+plot(sort(unique(fr_data$Year)), k, type = "l",
+     main = "Value of k with time", xlab = "Year")
+
+# ce graphe nous montre un polynome de degré k avec qqs ################## pendant les 2 guerres mondiales
+# (1 aussi vers 1870)
+
+# pour la prévison, on a ajusté une méthode non linéaire des moindres carrés sur k w.r.t. en fonction du temps pour les années 2000 à 2015
+
+mod_k <- mgcv::gam(k ~ year, data = data.frame(k = k, year = sort(unique(fr_data$Year))))
+k_pred <- predict(mod_k, newdata = data.frame(year = 2000:2015))
+
+#plot(c(sort(unique(fr_data$Year))),
+     #c(k, k_pred), type = "l",
+     #main = "value of k with time",
+     #xlab = "Year")
+
+
+df_plot = data.frame(k=k, year=sort(unique(fr_data$Year)))
+
+plot(df_plot$year, df_plot$k, type = "l",
+     main = "Value of k with time",
+     xlab = "Year")
+
+
+
+
+prediction_from_LC <- a$a_x + b%*%t(k_pred)
+
+fr_data_pred <- life_table %>%
+  filter(Country == "France", Year >= 2000, Year <= 2015) %>%
+  select(qx, Age, Year)
+
+A_pred <- us_data_pred %>% unique() %>%
+  pivot_wider(values_from = qx,
+              names_from = Year,
+              values_fn = list(qx = mean))
+
+A_pred[, -1] <- prediction_from_LC
+
+# we select only 2000, 2005, 2010, 2015
+# on sélectionne seulement 2000, 2005, 2010, 2015
+qx_pred <- A_pred
+qx_pred[, -1] <- exp(A_pred[, -1])
+
+
+qx_pred_select <- qx_pred %>%
+  select_at(c('Age', '2000', '2005', '2010', '2015')) %>%
+  pivot_longer(cols = -Age,
+               names_to = "Year",
+               values_to = "qx") %>%
+  mutate(class = "pred", Year = as.integer(Year))
+
+qx_obs_select <- us_data_pred %>%
+  filter(Year %in% seq(2000, 2015, 5)) %>%
+  mutate(class = "obs")
+
+
+bind_rows(qx_obs_select, qx_pred_select) %>%
+  ggplot(aes(x = Age, y = qx, color = class)) +
+  geom_point() +
+  facet_wrap(~Year, scales = "free") +
+  guides(color = guide_legend(title = "Class")) +
+  labs(title = "Predicted and observed mortality quotients")+
+  ylab("Mortality quotient")
+
+# 2 lignes pour les observations jusqu'à qu'on ait à la fois Male et Female
+
+
+```
+# Conclusion
+
+Pour conclure, l’étude de la table life_table nous a permis de voir l’évolution du taux de mortalité depuis 1816 à 2016, qui au cours du temps a baissé surtout chez les jeunes (de 0 à 40 ans). Cela pourrait être expliqué par le fait que la condition de vie et la condition hygiénique se sont améliorées au cours des années. D’autre part, nous avons constaté que le taux de mortalité chez les hommes est globalement plus élevé que celui des femmes. Par ailleurs, le taux de mortalité est différent en fonction des pays, cela pourrait être expliqué par la différence dans la culture, l’environnement, et la politique des pays. 
+
+
+
+
+#******************************************************************* PARTIE XI : Références
+
+__Tables de mortalité et démographie__
+
+- [Human Mortality Database](https://www.mortality.org)
+- [Tables de mortalité françaises, Jacques Vallin et France Meslé](https://www.lifetable.de/data/FRA/FRA000018061997CY1.pdf)
+- [Modeling and Forecasting U.S. Mortality, R.D.Lee and L.R. Carter, JASA 1992](https://www.jstor.org/stable/pdf/2290201.pdf)
+- [Les dimensions de la mortalité, S. Ledermann, Jean Breas, Population, 1959](https://www.jstor.org/stable/pdf/1526082.pdf)
+- Samuel H. Preston, Patrick Heuveline and Michel Guillot, _Demography: Measuring and Modeling Population Processes_, Oxford: Blackwell Publishers, 2001, xv + 291 pp.
+
+__Graphiques et rapports__
+
+- [Interactive web-based data visualization with R, plotly, and shiny](https://plotly-r.com/index.html)
+- [R for Data Science](https://r4ds.had.co.nz)
+- [Layered graphics](http://vita.had.co.nz/papers/layered-grammar.pdf)
+- [Plotly](http://plotly.com/)
+
+__Tidyverse__
+
+- [tidyselect](https://tidyselect.r-lib.org/articles/tidyselect.html)
+- [dbplyr](https://cran.r-project.org/web/packages/dbplyr/vignettes/dbplyr.html)
+- [data.table](https://github.com/Rdatatable/data.table)
+- [DT](https://rstudio.github.io/DT/)
+
+__PCA, SVD__
+
+- [FactoMineR](http://factominer.free.fr/index_fr.html)
+- [ade4](http://pbil.univ-lyon1.fr/ade4/accueil.php)
+- [FactoInvestigate](http://factominer.free.fr/reporting/index_fr.html)
+- [PCA and Tidyverse](https://cmdlinetips.com/2019/05/how-to-do-pca-in-tidyverse-framework/)
+- [tidyprcomp](https://broom.tidyverse.org/reference/tidy.prcomp.html)
+
+__Démographie__
+
+- [R package demography](https://cran.r-project.org/web/packages/demography/demography.pdf)
